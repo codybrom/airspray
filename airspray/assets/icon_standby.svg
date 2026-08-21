@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <g opacity="0.5">
+
+    <!-- Base Bowl (Always Solid Filled) -->
+    <path d="M 90,296 C 167,308 345,308 422,296 C 422,370 360,415 256,415 C 152,415 90,370 90,296 Z" fill="#FFFFFF" />
+
+
+    <!-- Top Dome (Real SVG Stroke Outline with Hollow Interior) -->
+    <path
+      d="M 96,280 C 96,155 133,101 206,98 C 256,96 256,96 306,98 C 379,101 416,155 416,280 C 342,290 170,290 96,280 Z"
+      fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linejoin="round" />
+
+    <!-- Top Nozzle Circle (Filled at 50% Opacity) -->
+    <ellipse cx="256" cy="105" rx="36" ry="9" fill="#FFFFFF" />
+  </g>
+</svg>

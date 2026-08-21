@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "airspray"
+version = "1.0.0"
+description = "Cross-Platform Air Wick Bluetooth Diffuser Controller & Presence Automation"
+authors = [{ name = "Cody Bromley" }]
+dependencies = ["bleak>=0.22.0", "pystray>=0.19.5", "Pillow>=10.0.0"]
+requires-python = ">=3.14"
+
+[project.scripts]
+airspray = "airspray.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["airspray*"]
+
+[tool.setuptools.package-data]
+airspray = ["assets/*"]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.14"
+# tests are included so the CLI checker sees what Pylance already flags in the
+# editor; the parity tests parse Swift source and are easy to get subtly wrong.
+include = ["airspray", "tests"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+ignore_missing_imports = true

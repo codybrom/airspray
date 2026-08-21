@@ -1,0 +1,24 @@
+name: AirSpray
+options:
+  bundleIdPrefix: com.codybrom
+  deploymentTarget:
+    macOS: "26.0"
+targets:
+  AirSpray:
+    type: application
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: AirsprayMac/Sources
+      - path: airspray/assets/Assets.xcassets
+    settings:
+      base:
+        PRODUCT_NAME: AirSpray
+        PRODUCT_BUNDLE_IDENTIFIER: com.codybrom.airspray
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_FILE: AirsprayMac/Info.plist
+        CODE_SIGN_ENTITLEMENTS: entitlements.plist
+        DEVELOPMENT_TEAM: YOUR_TEAM_ID
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        SWIFT_VERSION: "5"
+        GENERATE_INFOPLIST_FILE: NO

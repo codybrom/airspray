@@ -1,0 +1,62 @@
+# Python & PyInstaller
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+*.spec
+
+# Virtual Environments & Caches
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Xcode & Swift
+build_xcode/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+.build/
+*.dSYM/
+*.swiftdoc
+*.swiftmodule
+*Binary
+
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Logs & Temporary Files
+*.log
+*.err
+/tmp/
+
+# IDEs & Editors
+.idea/
+.vscode/
+*.swp
+*.swo
