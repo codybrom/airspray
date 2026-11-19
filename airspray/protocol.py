@@ -37,7 +37,7 @@ ROOM_PRESETS: Dict[str, int] = {
     "work": 8,
 }
 
-# Room IDs are fixed by the diffuser firmware; do not renumber.
+# Room IDs are fixed by the diffuser firmware. Do not renumber.
 ROOM_NAMES: Dict[int, str] = {
     1: "Bathroom",
     2: "Bedroom",
@@ -50,11 +50,11 @@ ROOM_NAMES: Dict[int, str] = {
 }
 
 
-# Fragrance names as shipped in the vendor app.
+# Fragrance names as shipped in the original app.
 #
 # All 33 are listed and all transmit -- the encoder does not validate. Note the
-# vendor's own BLE decoder only acknowledges 1-31, so for 32 and 33 the device
-# will not echo the value back; they are stored locally either way.
+# original app's own BLE decoder only acknowledges 1-31, so for 32 and 33 the device
+# will not echo the value back. They are stored locally either way.
 FRAGRANCE_NAMES: Dict[int, str] = {
     1: "Aroma Unwind",
     2: "Aroma Happiness",
@@ -93,7 +93,7 @@ FRAGRANCE_NAMES: Dict[int, str] = {
 
 MAX_FRAGRANCE_ID: int = max(FRAGRANCE_NAMES)
 
-# Level 0 pauses spraying; 1-4 are the fragrance strengths.
+# Level 0 pauses spraying, and 1-4 are the fragrance strengths.
 INTENSITY_NAMES: Dict[int, str] = {
     0: "Paused",
     1: "Low",
@@ -105,14 +105,14 @@ INTENSITY_NAMES: Dict[int, str] = {
 
 def fragrances_sorted_by_name() -> List[Tuple[int, str]]:
     """The catalogue ordered by name, for pickers. A 33-item list in ID order is
-    effectively unscannable; the IDs carry no meaning to the reader."""
+    effectively unscannable. The IDs carry no meaning to the reader."""
     return sorted(FRAGRANCE_NAMES.items(), key=lambda item: item[1].casefold())
 
 
 def is_recognised_device_name(name: str) -> bool:
     """Whether an advertised BLE name belongs to a diffuser we control.
 
-    Anchored like the vendor app (^(Air Wick Mist|AIRWICK REESES)$), but
+    Anchored like the original app (^(Air Wick Mist|AIRWICK REESES)$), but
     case-insensitive for tolerance. A substring match would happily pair with an
     unrelated humidifier called "Air Wick Mister".
     """
@@ -134,6 +134,14 @@ def resolve_room_id(location: str) -> int:
         if 1 <= val <= 8:
             return val
     return ROOM_PRESETS.get(loc_clean, 7)  # 7 = "Other"
+
+
+def is_room_preset(location: str) -> bool:
+    """Whether the text names a firmware room preset (by name or by 1-8)."""
+    loc_clean = location.strip().lower()
+    if loc_clean.isdigit():
+        return 1 <= int(loc_clean) <= 8
+    return loc_clean in ROOM_PRESETS
 
 
 # Command Codes
@@ -194,7 +202,7 @@ class Schedule:
 
     @property
     def is_set(self) -> bool:
-        """Whether the slot is occupied, matching the vendor's Schedule.isSet():
+        """Whether the slot is occupied, matching the original app's Schedule.isSet():
         decided purely by the window, ignoring `enabled`. A slot switched off
         still holds its times, and a cleared slot reads back all zeros."""
         return (
@@ -208,7 +216,7 @@ class Schedule:
         """An all-zero window is how the diffuser marks a slot free, so a
         midnight-to-midnight "all day" schedule would read back as an empty slot
         and vanish from the list. Widen it to 00:00-23:59, which is what the user
-        meant anyway. (The vendor dodged this by storing 00:01 as the start and
+        meant anyway. (The original app dodged this by storing 00:01 as the start and
         hiding it on read.)"""
         if self.is_set:
             return self
@@ -314,8 +322,8 @@ def encode_set_time(dt: Optional[datetime] = None) -> bytes:
 def encode_set_room_and_fragrance(room_id: int, fragrance_id: int) -> bytes:
     """Set room ID (1..8) and fragrance ID (1..33).
 
-    The catalogue runs to 33 even though the vendor's own BLE decoder only
-    acknowledges 1-31; 32 and 33 transmit but are not echoed back.
+    The catalogue runs to 33 even though the original app's own BLE decoder only
+    acknowledges 1-31, while 32 and 33 transmit but are not echoed back.
     """
     if not (1 <= room_id <= 8):
         raise ValueError("Room ID must be between 1 and 8")
@@ -527,7 +535,7 @@ def parse_notification(
 
     elif cmd == CMD_BATTERY_REPORT and len(payload) >= 1:
         level = payload[0]
-        # The diffuser intermittently reports 0 bars while spraying. The vendor app
+        # The diffuser intermittently reports 0 bars while spraying. The original app
         # only believes a 0 when the level was already nearly empty, so mirror that
         # rather than flashing a false "empty battery" at the user.
         if 0 <= level <= 4 and (level != 0 or abs(current_status.battery_level) <= 1):

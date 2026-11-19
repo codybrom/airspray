@@ -4,14 +4,14 @@
 
 > *Disclaimer: AirSpray is an independent, open-source project and is not affiliated with, endorsed by, or associated with Air Wick or Reckitt Benckiser.*
 
-Works on **macOS**, **Linux**, and **Windows**.
+Developed and tested on **macOS**. The Python tools are written to also run on
+**Linux** and **Windows**, but those platforms are untested.
 
 ---
 
 ## 🛠 Features
 
 - **Menu Bar / System Tray Controller**: Native menu bar app on macOS (NSStatusItem), Windows (System Tray), and Linux (AppIndicator) for one-click power toggling, intensity adjustments, live refill status, and burst spraying.
-- **Standalone Binary Distribution**: Can be compiled into a single self-contained executable with PyInstaller (`dist/airspray`) requiring zero Python runtime setup.
 - **Direct BLE Control**: Turn on/off, adjust intensity (0–4, where 0 pauses spraying), trigger instant spray bursts, query battery & firmware versions without any cloud dependence.
 - **On-Device Hardware Schedules**: Program up to 10 on-device EEPROM timers with custom start/end times, active days of the week, and intensity levels that run automatically even when disconnected.
 - **Cross-Platform Presence Automation**: Automatically powers on the diffuser when you are at your desk (unlocked screen / active work session) and turns it off when you lock your screen or leave, saving fragrance and battery.
@@ -24,35 +24,26 @@ Works on **macOS**, **Linux**, and **Windows**.
 
 ---
 
-## 📡 Protocol Summary (Reverse Engineered)
+## 🔗 Pairing the Diffuser
 
-| Parameter | Value |
-| --- | --- |
-| **Service UUID** | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` |
-| **Write Characteristic (TX)** | `6e400007-b5a3-f393-e0a9-e50e24dcca9e` |
-| **Notify Characteristic (RX)** | `6e400008-b5a3-f393-e0a9-e50e24dcca9e` |
-| **Framing** | `[0xFF, 0x55, CMD, LEN, ...PAYLOAD, CHECKSUM]` |
-| **Checksum** | `CMD ^ 0xAA ^ LEN ^ (XOR of all PAYLOAD bytes)` |
+The diffuser refuses commands from a computer it is not paired with, and it only
+accepts a pairing request while it is in pairing mode. Pair once per computer:
 
-### Command Codes
+1. Turn Bluetooth off on any phone that has the Air Wick app, so the phone does
+   not claim the diffuser first.
+2. Switch the diffuser off, wait about 10 seconds, and switch it back on. A
+   **blinking blue light** means it is in pairing mode.
+3. Launch AirSpray (or run any `airspray` command) while the light is blinking.
+4. On macOS, a "Connection Request from: Air Wick Mist" dialog appears. Click
+   **Connect**. The diffuser has no screen, so there is no number to compare.
 
-- `0x00`: Query MCU Firmware Version
-- `0x01`: Query Status (Power, Spraying, Intensity, Battery)
-- `0x02` / `0x03`: Query / Set Schedules (Slots 1–10)
-- `0x04`: Clear All Schedules
-- `0x05`: Sync RTC Time
-- `0x06`: Set Power (`0x01` = ON, `0x00` = OFF)
-- `0x07`: Set Intensity (`0x00`=Paused, `0x01`=Low, `0x02`=Medium, `0x03`=High, `0x04`=Max)
-- `0x08`: Set Room (1-8) & Fragrance (1-33) Presets — the vendor decoder only echoes 1-31
-  - Rooms: `1` Bathroom, `2` Bedroom, `3` Dining Room, `4` Foyer, `5` Kitchen, `6` Living Room, `7` Other, `8` Office
-- `0x09`: Trigger Fragrance Boost Spray
-- `0x0B`: Factory Reset Device
-- `0x11`: Spray Report (unsolicited notification while misting)
-- `0x12`: Battery Report (unsolicited, 0–4 bars)
-- `0x22`: Query BLE Firmware Version
+After that the connection is encrypted with the stored key and macOS does not
+ask again.
 
-Intensity level `0` **pauses** spraying without powering the diffuser down; scheduled
-windows still run. Battery is reported as 0–4 bars, not a percentage.
+**If the pairing dialog keeps coming back:** the diffuser is not in pairing mode.
+It rejects the request by itself about two seconds after the dialog appears, so
+clicking Connect has no effect, and every reconnect raises the dialog again.
+Quit AirSpray, repeat the steps above, and relaunch.
 
 ---
 
@@ -89,23 +80,32 @@ airspray scan
 # Check status (Location, Power, Intensity, Battery, Refill %, Firmware)
 airspray status
 
-# Turn ON with Medium intensity
+# Turn ON, keeping the current intensity
+airspray on
+
+# Turn ON and set Medium intensity
 airspray on --intensity 2
 
 # Trigger an immediate fragrance burst
 airspray boost
 
-# Adjust intensity (0 to 4; 0 pauses spraying)
+# Adjust intensity (0 to 4, where 0 pauses spraying)
 airspray intensity 3
 
 # Turn OFF
 airspray off
 ```
 
+When a command fails, it prints a one-line `❌` message saying why and exits
+with an error status, so scripts can tell. It never prints default values as if
+they came from the diffuser. That covers a diffuser that doesn't answer, a
+refused connection (the message explains pairing), and a settings file that
+can't be saved. Mistyped arguments are rejected before connecting.
+
 ### 4. On-Device Hardware Schedules (Standalone EEPROM)
 
 ```bash
-# List all active hardware schedules stored on the diffuser
+# List every schedule slot stored on the diffuser (disabled ones are marked)
 airspray schedule list
 
 # Program a schedule in slot #1: 9am to 5:30pm Mon-Fri with intensity 2
@@ -118,11 +118,16 @@ airspray schedule delete 1
 airspray schedule clear
 ```
 
+`--days` accepts `mon` through `sun`. An unknown day is an error, not silently dropped.
+
 ### 5. Device Management (Location, Clock, Reset)
 
 ```bash
 # Set custom location name (or preset like Office, Bedroom, Living Room) & fragrance
 airspray config-device --location "Corner Studio" --fragrance "Wild Mint"
+
+# Change only one of them. The other keeps its current value
+airspray config-device --fragrance "Wild Mint"
 
 # List the fragrance names the menu bar app and the CLI both accept
 airspray fragrances
@@ -143,9 +148,14 @@ airspray refill status
 # Reset to 100% when inserting a new refill
 airspray refill reset
 
-# Adjust percentage manually if needed (e.g. 75%)
+# Insert a partly used bottle: sets the level and restarts the install date
+airspray refill reset --percent 88
+
+# Correct the estimate for the bottle already in the diffuser (e.g. 75%)
 airspray refill adjust 75
 ```
+
+Values outside 0–100 are brought back into that range.
 
 ### 7. Office Presence Automation
 
@@ -163,19 +173,17 @@ airspray service status
 airspray service uninstall
 ```
 
-### 8. Build
+Overnight windows work (`--start 22:00 --end 06:00`), and `--end 24:00` means
+end of day. If the diffuser cannot be reached, the daemon and the tray retry
+with a growing delay (10 seconds up to 5 minutes) instead of every few seconds,
+so an unpaired diffuser cannot flood you with pairing dialogs. Stopping the
+service turns the diffuser off. A manual on/off from the tray is kept until the
+next time you arrive or leave.
 
-### 🚀 Running the App
+## 🖥 macOS Menu Bar App
 
-### 1. macOS Menu Bar Application (`Airspray.app`)
-
-You can launch the native macOS application directly from Finder or Terminal:
-
-```bash
-open dist/Airspray.app
-```
-
-Or copy `dist/Airspray.app` into `/Applications` for easy access.
+The native menu bar app is built with Xcode from `macos/AirSpray.xcodeproj`.
+See [Development](docs/development.md) for building, installing and signing.
 
 **Menu Bar Layout:**
 
@@ -186,62 +194,45 @@ Or copy `dist/Airspray.app` into `/Applications` for easy access.
 - **Intensity**: Low, Medium, High, Max (pausing lives on its own item, not in here).
 - **Schedule...**: read, add, edit and delete all ten on-device slots.
 - **Refill Bottle...**: set the level from a quick amount or a slider, and pick a
-  fragrance by name.
+  fragrance by name. Tick "This is a different bottle" when you swap in a
+  partly used bottle, so the install date restarts. Setting 100% always does.
 - **Settings ›**: Auto-Pause on Screen Lock, Launch at Login, Room Profile,
-  Scan for Diffusers, Switch Diffuser, Copy Diagnostics & Schema.
+  Scan for Diffusers, Switch Diffuser, Copy Diagnostics & Schema, and About
+  AirSpray (app version and build, plus the diffuser's firmware versions).
+- **Version line**: the running version and build, greyed out above Quit.
+
+Things the menu tells you:
+
+- **Reading State...** right after connecting, until the diffuser reports its
+  real power, intensity and battery. Schedules are read at the same time.
+- **Needs Pairing** when the diffuser refuses the connection. See
+  [Pairing the Diffuser](#-pairing-the-diffuser).
+- **Pause/Resume pending** when you toggle power while disconnected. It is sent
+  as soon as the diffuser connects. Boost, Intensity, Schedule and Room Profile
+  are disabled until then, so nothing appears to succeed when it was not sent.
+- **Launch at Login** shows when macOS still needs your approval under System
+  Settings › General › Login Items.
+
+Auto-Pause on Screen Lock only resumes what it paused: if you pause manually and
+then lock the screen, unlocking leaves the diffuser paused. Scan for Diffusers
+lists other diffusers without disconnecting the current one.
 
 ---
 
-### 2. Standalone CLI Binary
+## 📚 More Documentation
 
-Both the app and CLI are code-signed with your Apple Developer certificate (`com.codybrom.airspray`):
-
-```bash
-# Power controls
-./dist/airspray on
-./dist/airspray off
-./dist/airspray boost
-./dist/airspray intensity 2
-
-# Status & discovery
-./dist/airspray status
-./dist/airspray scan
-./dist/airspray refill status
-```
+- [Development](docs/development.md): repository layout, building and installing
+  the macOS app with Xcode, signing setup, and tests.
+- [Shared configuration](docs/shared-config.md): the `~/.airspray_config.json`
+  file both apps use, and the rules that keep them from overwriting each other.
+- [Protocol](docs/protocol.md): the complete reverse-engineered Bluetooth LE
+  protocol (GATT, framing, every command and report, status and schedule
+  layouts, the room, fragrance and schedule-name tables), how the original app
+  connects and handles refills and batteries, and where this project differs.
 
 ---
 
-## 🗂 Shared Configuration
+## 📄 License
 
-The CLI and the macOS menu bar app read and write the same file:
-
-```txt
-~/.airspray_config.json
-```
-
-Both use the same JSON keys (`lastAddress`, `refillPercentage`, `lastRoomId`, ...)
-and both **merge** on save rather than overwriting, so keys owned by one side
-survive a write by the other. Refill state lives here too; the older
-`~/.airspray/state.json` is migrated once and then ignored.
-
----
-
-## 🧪 Running Tests
-
-```bash
-pytest -v
-```
-
-The suite includes a parity layer that pins the Swift menu bar app to the Python
-port: `tests/test_swift_protocol_parity.py` compares command codes, UUIDs, room
-and fragrance tables, intensity labels, the refill curve and the shared config
-key contract by parsing `AirsprayMac/Sources/*.swift`, and
-`tests/test_swift_protocol_behavior.py` compiles that Swift and exercises it.
-The compiled tests skip automatically when `swiftc` is unavailable.
-
-Both packages are type-checked strictly:
-
-```bash
-pyright --pythonpath .venv/bin/python
-mypy airspray tests
-```
+[MIT](LICENSE). AirSpray is an independent project and is not affiliated with
+Air Wick or Reckitt Benckiser.

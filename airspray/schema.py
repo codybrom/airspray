@@ -37,7 +37,7 @@ class DeviceStateSchema:
 
 @dataclass
 class LocationProfileSchema:
-    # 8 is Office; 7 is "Other". Keep the pair consistent -- see
+    # 8 is Office and 7 is "Other". Keep the pair consistent -- see
     # test_schema_default_room_name_matches_its_id.
     room_id: int = 8
     room_name: str = "Office"

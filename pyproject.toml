@@ -1,14 +1,45 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "airspray"
-version = "1.0.0"
+version = "1.1.0"
 description = "Cross-Platform Air Wick Bluetooth Diffuser Controller & Presence Automation"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Cody Bromley" }]
 dependencies = ["bleak>=0.22.0", "pystray>=0.19.5", "Pillow>=10.0.0"]
 requires-python = ">=3.14"
+keywords = [
+    "air-wick",
+    "bluetooth",
+    "ble",
+    "diffuser",
+    "home-automation",
+    "menu-bar",
+    "tray",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: MacOS X",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Home Automation",
+]
+
+[project.urls]
+Homepage = "https://github.com/codybrom/airspray"
+Repository = "https://github.com/codybrom/airspray"
+Issues = "https://github.com/codybrom/airspray/issues"
+Changelog = "https://github.com/codybrom/airspray/releases"
+Documentation = "https://github.com/codybrom/airspray/tree/main/docs"
 
 [project.scripts]
 airspray = "airspray.cli:main"
@@ -23,6 +54,11 @@ airspray = ["assets/*"]
 [tool.pyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.14"
+# Resolve third-party imports (pytest, Pillow, bleak, pystray) from the project
+# venv whichever interpreter the editor happens to have selected. Without this
+# Pylance reports pytest as unresolved and every type built on it as Unknown.
+venvPath = "."
+venv = ".venv"
 # tests are included so the CLI checker sees what Pylance already flags in the
 # editor; the parity tests parse Swift source and are easy to get subtly wrong.
 include = ["airspray", "tests"]

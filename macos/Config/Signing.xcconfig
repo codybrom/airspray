@@ -1,0 +1,13 @@
+// Signing settings for the AirSpray target.
+//
+// Nothing personal belongs in this file or in the Xcode project: the Apple
+// Developer team ID lives in macos/Config/Local.xcconfig, which is gitignored.
+// Create that file with one line:
+//
+//     DEVELOPMENT_TEAM = <your team id>
+//
+// Do not pick a team under Signing & Capabilities in Xcode: that writes
+// DEVELOPMENT_TEAM into the project file, which is committed.
+// tests/test_no_signing_identity.py fails if that happens.
+
+#include? "Local.xcconfig"

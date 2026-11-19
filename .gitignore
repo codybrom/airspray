@@ -1,4 +1,4 @@
-# Python & PyInstaller
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -31,11 +31,15 @@ env/
 .ruff_cache/
 
 # Xcode & Swift
+macos/Config/Local.xcconfig
 build_xcode/
 DerivedData/
-*.xcodeproj/xcuserdata/
-*.xcodeproj/project.xcworkspace/xcuserdata/
-*.xcworkspace/xcuserdata/
+# Per-user Xcode state, wherever the project lives. (A pattern with a slash in
+# the middle, like "*.xcodeproj/xcuserdata/", only matches at the repo root.)
+xcuserdata/
+*.xcuserstate
+# Xcode recreates the workspace embedded in a project whenever it opens it.
+**/*.xcodeproj/project.xcworkspace/
 .build/
 *.dSYM/
 *.swiftdoc

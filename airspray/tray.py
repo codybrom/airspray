@@ -8,6 +8,7 @@ import asyncio
 import logging
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Coroutine, List, Optional, Tuple
 from bleak.backends.device import BLEDevice
@@ -53,8 +54,8 @@ except Exception:
 
 from airspray.autostart import is_launch_at_login_enabled, set_launch_at_login
 from airspray.client import AirWickDiffuser, scan_for_diffusers
-from airspray.config import AppConfig
-from airspray.presence import is_screen_locked
+from airspray.config import AppConfig, update_config
+from airspray.presence import Backoff, is_screen_locked, presence_target
 from airspray.refill import RefillTracker
 
 logger = logging.getLogger("airspray.tray")
@@ -256,16 +257,28 @@ def get_tray_icon(is_active: bool = False, intensity: int = 2) -> Image.Image:
     return render_svg_icon(is_active=is_active, intensity=intensity, size=(128, 128))
 
 
+PRESENCE_TICK_SECONDS: float = 10.0
+
+
+def _brief(error: BaseException) -> str:
+    """An error short enough to sit in a menu row."""
+    text = str(error).strip() or type(error).__name__
+    return text if len(text) <= 70 else text[:67] + "..."
+
+
 class AirSprayTrayApp:
     def __init__(self, address: Optional[str] = None) -> None:
-        self.config: AppConfig = AppConfig.load()
         if address:
-            self.config.device_address = address
-            self.config.save()
+            update_config(device_address=address)
 
         self.tracker: RefillTracker = RefillTracker()
-        self.is_on: bool = False
-        self.intensity: int = self.config.default_intensity
+        # A read-only snapshot for drawing the menu. It is refreshed from disk
+        # and never written back. Every change goes through update_config so a
+        # stale copy cannot revert what the CLI or the Mac app wrote meanwhile.
+        self._view: AppConfig = AppConfig.load()
+        # None until the diffuser has told us. The tray does not assume "off".
+        self.is_on: Optional[bool] = None
+        self.intensity: int = self._view.default_intensity
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._async_thread: Optional[threading.Thread] = None
         self._presence_thread: Optional[threading.Thread] = None
@@ -273,184 +286,315 @@ class AirSprayTrayApp:
         self._running: bool = False
         self._status_message: str = "Ready"
 
+        # One BLE conversation at a time, manual or automatic.
+        self._ble_lock: asyncio.Lock = asyncio.Lock()
+        # Automatic attempts: at most one in flight, spaced out after failures.
+        self._auto_in_flight: bool = False
+        self._backoff: Backoff = Backoff()
+        # The last thing presence asked for, to spot transitions.
+        self._last_target: Optional[bool] = None
+        # Set by a manual on/off. Presence leaves the diffuser alone until its
+        # own next transition (lock, unlock, schedule edge).
+        self._manual_hold: bool = False
+        self._startup_sync_done: bool = False
+
+    # -- plumbing ----------------------------------------------------------
+
     def _run_async_loop(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def run_coro(self, coro: Coroutine[object, object, None]) -> None:
+    def run_coro(self, coro: Coroutine[object, object, None]) -> bool:
+        """Schedule a coroutine on the BLE loop. False if it could not be."""
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(coro, self._loop)
+            return True
+        coro.close()  # never leave an un-awaited coroutine behind
+        return False
+
+    def _refresh_view(self) -> None:
+        try:
+            self._view = AppConfig.load()
+        except Exception as e:
+            logger.error(f"Could not read config: {e}")
+
+    def _save(self, **changes: object) -> bool:
+        """Write just these settings to the shared config."""
+        try:
+            self._view = update_config(None, **changes)
+            return True
+        except Exception as e:
+            logger.error(f"Could not save settings: {e}")
+            self._status_message = f"Could not save settings: {_brief(e)}"
+            return False
+
+    def _record(self, action: Callable[[], object]) -> None:
+        """Run a refill-tracker update. A failed write must not undo a command."""
+        try:
+            action()
+        except Exception as e:
+            logger.error(f"Could not record refill usage: {e}")
+
+    def _address(self) -> Optional[str]:
+        self._refresh_view()
+        return self._view.device_address
+
+    # -- presence ----------------------------------------------------------
+
+    def _presence_decision(self, target: Optional[bool], now: float) -> Optional[bool]:
+        """Whether presence should act right now, and to which state.
+
+        `target` is what presence wants (None = tracking off). `Now` is a
+        monotonic clock reading. Returns the state to apply, or None to wait.
+        """
+        if target is None:
+            self._last_target = None
+            return None
+        if target != self._last_target:
+            self._last_target = target
+            self._manual_hold = False
+            self._backoff.reset()
+        if self._manual_hold or self._auto_in_flight:
+            return None
+        if self.is_on is not None and self.is_on == target:
+            return None
+        if not self._backoff.ready(now):
+            return None
+        return target
+
+    def _presence_tick(self) -> None:
+        self._refresh_view()
+        locked = is_screen_locked()
+        target = presence_target(self._view, datetime.now(), locked)
+        action = self._presence_decision(target, time.monotonic())
+        if action is not None:
+            self._auto_in_flight = True
+            if not self.run_coro(self._auto_apply(action, locked)):
+                self._auto_in_flight = False
+        elif (
+            target is None
+            and self.is_on is None
+            and not self._startup_sync_done
+            and not self._auto_in_flight
+        ):
+            # Presence is off, so nothing else will ask: learn the real power
+            # state once instead of presenting a guess.
+            self._auto_in_flight = True
+            if self.run_coro(self._auto_apply(None, locked)):
+                self._startup_sync_done = True
+            else:
+                self._auto_in_flight = False
 
     def _run_presence_loop(self) -> None:
         """Background thread monitoring desk presence and schedule."""
-        from datetime import datetime
-
-        def parse_minutes(t_str: str, default: int) -> int:
-            try:
-                parts = [int(p.strip()) for p in t_str.split(":")]
-                return parts[0] * 60 + (parts[1] if len(parts) > 1 else 0)
-            except Exception:
-                return default
-
         while self._running:
             try:
-                if self.config.presence_enabled:
-                    now = datetime.now()
-                    day_1_to_7 = now.weekday() + 1
-                    in_days = day_1_to_7 in self.config.active_days
-                    curr_min = now.hour * 60 + now.minute
-                    start_min = parse_minutes(self.config.start_time, 0)
-                    end_min = parse_minutes(self.config.end_time, 1440)
-                    in_time = start_min <= curr_min < end_min
-
-                    in_schedule = in_days and in_time
-                    locked = is_screen_locked()
-                    is_present = in_schedule and not locked
-
-                    should_be_on = is_present
-                    if should_be_on != self.is_on:
-                        if should_be_on:
-                            self._status_message = "Desk Active • Auto ON"
-                            self.run_coro(self._async_turn_on())
-                        else:
-                            reason = (
-                                "Screen Locked"
-                                if (in_schedule and locked)
-                                else "Off Hours"
-                            )
-                            self._status_message = f"{reason} • Auto OFF"
-                            self.run_coro(self._async_turn_off())
+                self._presence_tick()
             except Exception as e:
                 logger.error(f"Error in presence loop: {e}")
-            time.sleep(10)
+            time.sleep(PRESENCE_TICK_SECONDS)
+
+    async def _auto_apply(self, target: Optional[bool], locked: bool) -> None:
+        """One automatic attempt: learn the power state, then match `target`.
+
+        With target None it only reads the state. Failures back off
+        exponentially. They are never retried on the next tick.
+        """
+        ok = False
+        try:
+            async with self._ble_lock:
+                async with AirWickDiffuser(self._address()) as diffuser:
+                    if self.is_on is None:
+                        status = await diffuser.get_status()
+                        self.is_on = status.power
+                    if target is not None and self.is_on != target:
+                        if target:
+                            await diffuser.turn_on()
+                            await diffuser.set_intensity(self.intensity)
+                        else:
+                            await diffuser.turn_off()
+                        changed = True
+                    else:
+                        changed = False
+            if target is not None:
+                self.is_on = target
+                if changed:
+                    if target:
+                        self._record(
+                            lambda: self.tracker.update_usage(True, self.intensity)
+                        )
+                        self._status_message = "Desk Active • Auto ON"
+                    else:
+                        self._record(lambda: self.tracker.update_usage(False, None))
+                        reason = "Screen Locked" if locked else "Off Hours"
+                        self._status_message = f"{reason} • Auto OFF"
+            ok = True
+        except Exception as e:
+            logger.error(f"Automatic diffuser update failed: {e}")
+            wait = self._backoff.fail(time.monotonic())
+            self._status_message = f"Diffuser unreachable • retry in {wait:.0f}s"
+        finally:
+            if ok:
+                self._backoff.reset()
+            self._auto_in_flight = False
+            self._update_icon()
+
+    # -- manual actions ----------------------------------------------------
+
+    async def _async_set_power(self, on: bool) -> None:
+        try:
+            async with self._ble_lock:
+                async with AirWickDiffuser(self._address()) as diffuser:
+                    if on:
+                        await diffuser.turn_on()
+                        await diffuser.set_intensity(self.intensity)
+                    else:
+                        await diffuser.turn_off()
+            self.is_on = on
+            if on:
+                self._record(lambda: self.tracker.update_usage(True, self.intensity))
+            else:
+                self._record(lambda: self.tracker.update_usage(False, None))
+            self._status_message = "Turned ON" if on else "Turned OFF"
+        except Exception as e:
+            logger.error(f"Error turning {'on' if on else 'off'} diffuser: {e}")
+            self._status_message = f"Failed: {_brief(e)}"
+        finally:
+            self._update_icon()
 
     async def _async_turn_on(self) -> None:
-        try:
-            diffuser = AirWickDiffuser(self.config.device_address)
-            await diffuser.connect()
-            await diffuser.turn_on()
-            await diffuser.set_intensity(self.intensity)
-            self.tracker.update_usage(True, self.intensity)
-            await diffuser.disconnect()
-            self.is_on = True
-            self._update_icon()
-        except Exception as e:
-            logger.error(f"Error turning on diffuser: {e}")
+        await self._async_set_power(True)
 
     async def _async_turn_off(self) -> None:
-        try:
-            diffuser = AirWickDiffuser(self.config.device_address)
-            await diffuser.connect()
-            await diffuser.turn_off()
-            self.tracker.update_usage(False, 0)
-            await diffuser.disconnect()
-            self.is_on = False
-            self._update_icon()
-        except Exception as e:
-            logger.error(f"Error turning off diffuser: {e}")
+        await self._async_set_power(False)
 
     async def _async_boost(self) -> None:
         try:
-            diffuser = AirWickDiffuser(self.config.device_address)
-            await diffuser.connect()
-            await diffuser.boost()
-            self.tracker.record_boost()
-            await diffuser.disconnect()
+            async with self._ble_lock:
+                async with AirWickDiffuser(self._address()) as diffuser:
+                    await diffuser.boost()
+            self._record(self.tracker.record_boost)
+            self._status_message = "Boost sprayed"
         except Exception as e:
             logger.error(f"Error triggering boost: {e}")
+            self._status_message = f"Failed: {_brief(e)}"
+        finally:
+            self._update_icon()
 
     async def _async_set_intensity(self, level: int) -> None:
         try:
-            diffuser = AirWickDiffuser(self.config.device_address)
-            await diffuser.connect()
-            await diffuser.set_intensity(level)
+            async with self._ble_lock:
+                async with AirWickDiffuser(self._address()) as diffuser:
+                    await diffuser.set_intensity(level)
             self.intensity = level
-            self.config.default_intensity = level
-            self.config.save()
-            self.tracker.update_usage(self.is_on, level)
-            await diffuser.disconnect()
-            self._update_icon()
+            # Power is untouched by an intensity change. Keep what is recorded.
+            self._record(lambda: self.tracker.update_usage(None, level))
+            self._save(default_intensity=level)
         except Exception as e:
             logger.error(f"Error setting intensity: {e}")
+            self._status_message = f"Failed: {_brief(e)}"
+        finally:
+            self._update_icon()
 
     async def _async_scan_and_pair(self) -> None:
         try:
             self._status_message = "Scanning for Diffusers..."
             self._update_icon()
-            found: List[BLEDevice] = await scan_for_diffusers(timeout=5.0)
+            async with self._ble_lock:
+                found: List[BLEDevice] = await scan_for_diffusers(timeout=5.0)
             if found:
                 dev = found[0]
-                self.config.device_address = dev.address
-                self.config.save()
-                self._status_message = f"Connected: {dev.name or dev.address}"
+                if self._save(device_address=dev.address):
+                    self._status_message = f"Selected: {dev.name or dev.address}"
+                    self.is_on = None  # a different diffuser. State unknown again
             else:
                 self._status_message = "No Diffusers Found"
-            self._update_icon()
         except Exception as e:
-            self._status_message = f"Scan Failed: {e}"
+            self._status_message = f"Scan Failed: {_brief(e)}"
+        finally:
             self._update_icon()
+
+    def _manual_action(self) -> None:
+        """A person asked for something: stop holding back after old failures."""
+        self._backoff.reset()
 
     def toggle_power(self, _icon: object, _item: object) -> None:
-        if self.is_on:
-            self.run_coro(self._async_turn_off())
-        else:
-            self.run_coro(self._async_turn_on())
+        self._manual_action()
+        # Respected until presence next changes its mind (lock/unlock/schedule).
+        self._manual_hold = True
+        self.run_coro(self._async_set_power(not self.is_on))
 
     def trigger_boost(self, _icon: object, _item: object) -> None:
+        self._manual_action()
         self.run_coro(self._async_boost())
 
     def set_level(self, level: int) -> None:
+        self._manual_action()
         self.run_coro(self._async_set_intensity(level))
 
     def reset_refill(self, _icon: object, _item: object) -> None:
-        self.tracker.reset_refill()
+        try:
+            self.tracker.reset_refill()
+        except Exception as e:
+            logger.error(f"Could not reset refill: {e}")
+            self._status_message = f"Could not save settings: {_brief(e)}"
         self._update_icon()
 
     def toggle_presence(self, _icon: object, _item: object) -> None:
-        self.config.presence_enabled = not self.config.presence_enabled
-        self.config.save()
+        self._refresh_view()
+        self._save(presence_enabled=not self._view.presence_enabled)
         self._update_icon()
 
     def set_schedule_office(self, _icon: object, _item: object) -> None:
-        self.config.start_time = "09:00"
-        self.config.end_time = "17:30"
-        self.config.active_days = [1, 2, 3, 4, 5]
-        self.config.presence_enabled = True
-        self.config.save()
+        self._save(
+            start_time="09:00",
+            end_time="17:30",
+            active_days=[1, 2, 3, 4, 5],
+            schedule_always=False,
+            presence_enabled=True,
+        )
         self._update_icon()
 
     def set_schedule_always(self, _icon: object, _item: object) -> None:
-        self.config.start_time = "00:00"
-        self.config.end_time = "23:59"
-        self.config.active_days = [1, 2, 3, 4, 5, 6, 7]
-        self.config.presence_enabled = True
-        self.config.save()
+        # A flag, not a 00:00-23:59 window: a window has an end, and the
+        # diffuser used to switch off for the last minute of every day.
+        self._save(
+            schedule_always=True,
+            active_days=[1, 2, 3, 4, 5, 6, 7],
+            presence_enabled=True,
+        )
         self._update_icon()
 
     def toggle_launch_at_login(self, _icon: object, _item: object) -> None:
-        current = is_launch_at_login_enabled()
-        target = not current
+        target = not is_launch_at_login_enabled()
         if set_launch_at_login(target):
-            self.config.launch_at_login = target
-            self.config.save()
+            self._save(launch_at_login=target)
+        else:
+            self._status_message = "Launch at Login unavailable (not an app bundle?)"
         self._update_icon()
 
     def trigger_scan(self, _icon: object, _item: object) -> None:
+        self._manual_action()
         self.run_coro(self._async_scan_and_pair())
+
+    # -- menu --------------------------------------------------------------
 
     def _update_icon(self) -> None:
         if self._icon is not None:
-            setattr(self._icon, "icon", get_tray_icon(self.is_on, self.intensity))
+            setattr(self._icon, "icon", get_tray_icon(bool(self.is_on), self.intensity))
             setattr(self._icon, "menu", self._build_menu())
 
     def _build_menu(self) -> Menu:
-        refill_pct = self.tracker.state.refill_percent
-        filled = int(refill_pct / 10)
-        bar = "█" * filled + "░" * (10 - filled)
-        loc = self.tracker.state.location_name
-
-        refill_text = f"Refill: [{bar}] {refill_pct:.1f}%"
+        try:
+            refill_pct = max(0.0, min(100.0, self.tracker.state.refill_percent))
+            filled = int(refill_pct / 10)
+            bar = "█" * filled + "░" * (10 - filled)
+            refill_text = f"Refill: [{bar}] {refill_pct:.1f}%"
+        except Exception as e:
+            logger.error(f"Could not read refill level: {e}")
+            refill_text = "Refill: unknown"
+        loc = self._view.location_label
 
         def _noop(_icon: object, _item: object) -> None:
             pass
@@ -482,23 +626,19 @@ class AirSprayTrayApp:
         ]
 
         def _check_presence_enabled(_item: object) -> bool:
-            return self.config.presence_enabled
+            return self._view.presence_enabled
 
         def _check_schedule_office(_item: object) -> bool:
             return (
-                self.config.presence_enabled
-                and self.config.start_time == "09:00"
-                and self.config.end_time == "17:30"
-                and len(self.config.active_days) == 5
+                self._view.presence_enabled
+                and not self._view.schedule_always
+                and self._view.start_time == "09:00"
+                and self._view.end_time == "17:30"
+                and sorted(self._view.active_days) == [1, 2, 3, 4, 5]
             )
 
         def _check_schedule_always(_item: object) -> bool:
-            return (
-                self.config.presence_enabled
-                and self.config.start_time == "00:00"
-                and self.config.end_time == "23:59"
-                and len(self.config.active_days) == 7
-            )
+            return self._view.presence_enabled and self._view.schedule_always
 
         def _check_launch_login(_item: object) -> bool:
             return is_launch_at_login_enabled()
@@ -557,16 +697,16 @@ class AirSprayTrayApp:
         self._running = True
         self._async_thread = threading.Thread(target=self._run_async_loop, daemon=True)
         self._async_thread.start()
+        time.sleep(0.1)  # let the BLE loop start before the first presence tick
 
         self._presence_thread = threading.Thread(
             target=self._run_presence_loop, daemon=True
         )
         self._presence_thread.start()
 
-        time.sleep(0.1)
         self._icon = Icon(
             "airspray",
-            icon=get_tray_icon(self.is_on, self.intensity),
+            icon=get_tray_icon(bool(self.is_on), self.intensity),
             title="AirSpray Diffuser Controller",
             menu=self._build_menu(),
         )
